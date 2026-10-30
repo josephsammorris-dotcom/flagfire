@@ -1,0 +1,9 @@
+{
+  "name": "flagfire",
+  "private": true,
+  "description": "Flagfire: Island Assault, a Return Fire-style three.js browser game",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}

@@ -1,0 +1,8 @@
+// Cloudflare Workers config: public/ is served as a static site (the whole game is public/index.html)
+{
+  "name": "flagfire",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public"
+  }
+}
