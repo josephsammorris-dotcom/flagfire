@@ -214,8 +214,8 @@
   <button id="againBtn" class="bigBtn stencil">PLAY AGAIN</button>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script>
+<script type="module">
+import * as THREE from './vendor/three.module.min.js';
 (function(){
 "use strict";
 
@@ -271,6 +271,8 @@ function makeTex(size,draw,rx,ry){
   const c=document.createElement('canvas');c.width=c.height=size;
   const g=c.getContext('2d');draw(g,size);
   const t=new THREE.CanvasTexture(c);
+  t.colorSpace=THREE.SRGBColorSpace;
+  t.anisotropy=Math.min(8,renderer.capabilities.getMaxAnisotropy());   // crisp ground at a glancing angle
   t.wrapS=t.wrapT=THREE.RepeatWrapping;
   if(rx)t.repeat.set(rx,ry||rx);
   return t;
@@ -435,14 +437,14 @@ function buildTextures(){
       g.beginPath();g.arc(x,y,2.4,0,7);g.fill();
       g.fillStyle='#e8b52e';g.beginPath();g.arc(x,y,0.9,0,7);g.fill();
     }
-    return new THREE.CanvasTexture(c);
+    const ft=new THREE.CanvasTexture(c);ft.colorSpace=THREE.SRGBColorSpace;return ft;
   })();
   const c=document.createElement('canvas');c.width=64;c.height=512;
   const g2=c.getContext('2d');
   const gr=g2.createLinearGradient(0,0,0,512);
   gr.addColorStop(0,'#7fb2dd');gr.addColorStop(0.55,'#b8d6e8');gr.addColorStop(1,'#e8ead6');
   g2.fillStyle=gr;g2.fillRect(0,0,64,512);
-  TEX.sky=new THREE.CanvasTexture(c);
+  TEX.sky=new THREE.CanvasTexture(c);TEX.sky.colorSpace=THREE.SRGBColorSpace;
 }
 
 /* ============================== renderer / scene ============================== */
@@ -451,6 +453,12 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio,1.5));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled=true;
 renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+/* colour-managed output (sRGB) with filmic tone mapping: richer, less washed-out colour than the
+   old r128 linear output. Light intensities below are x PI because three.js now uses physical
+   light units (the old renderer multiplied by PI internally). */
+renderer.outputColorSpace=THREE.SRGBColorSpace;
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure=1.4;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene=new THREE.Scene();
@@ -460,8 +468,8 @@ scene.fog=new THREE.Fog(0xd6e2df,340,940);
 
 const camera=new THREE.PerspectiveCamera(55,innerWidth/innerHeight,0.5,3000);
 
-scene.add(new THREE.HemisphereLight(0xeef6ff,0x55603a,0.8));
-const sun=new THREE.DirectionalLight(0xfff0d0,1.05);
+scene.add(new THREE.HemisphereLight(0xeef6ff,0x55603a,0.8*Math.PI));
+const sun=new THREE.DirectionalLight(0xfff0d0,1.05*Math.PI);
 sun.position.set(-70,140,-50);
 sun.castShadow=true;
 sun.shadow.mapSize.set(2048,2048);
@@ -471,14 +479,19 @@ sun.shadow.bias=-0.0008;
 sun.shadow.normalBias=0.9;
 scene.add(sun); scene.add(sun.target);
 
-const flashLight=new THREE.PointLight(0xffa640,0,80);
+const flashLight=new THREE.PointLight(0xffa640,0,80,1);   // decay 1, as r128 had
 flashLight.position.y=6; scene.add(flashLight);
 
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;
   camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
 
-const M=(c)=>new THREE.MeshLambertMaterial({color:c});
-const MT=(tex,tint)=>new THREE.MeshLambertMaterial({map:tex,color:tint||0xffffff});
+/* materials are cached and shared: the same colour (or texture + tint) reuses one material rather than
+   creating a new one every call (the island used to build ~5,000). Shared materials are never edited in
+   place (code swaps in a different one instead) and never disposed. */
+const MAT_CACHE=new Map();
+function sharedMat(key,make){let m=MAT_CACHE.get(key);if(!m){m=make();m.userData.shared=true;MAT_CACHE.set(key,m);}return m;}
+const M=(c)=>sharedMat('c'+c,()=>new THREE.MeshLambertMaterial({color:c}));
+const MT=(tex,tint)=>sharedMat('t'+tex.uuid+'|'+(tint||0xffffff),()=>new THREE.MeshLambertMaterial({map:tex,color:tint||0xffffff}));
 function box(w,h,d,mat){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),
   mat.isMaterial?mat:M(mat));m.castShadow=true;return m;}
 function cyl(rt,rb,h,mat,seg){const m=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg||10),
@@ -632,10 +645,11 @@ function ground(geo,mat,y){
   const m=new THREE.Mesh(geo,mat);m.rotation.x=-Math.PI/2;m.position.y=y;
   m.receiveShadow=true;scene.add(m);return m;
 }
+const SCORCH_GEO=new THREE.CircleGeometry(1,18), SCORCH_MAT=new THREE.MeshBasicMaterial({color:0x1c1e19,transparent:true,opacity:0.55,depthWrite:false});
+SCORCH_GEO.userData.shared=SCORCH_MAT.userData.shared=true;
 function scorch(x,z,r){
-  const m=ground(new THREE.CircleGeometry(r,18),
-    new THREE.MeshBasicMaterial({color:0x1c1e19,transparent:true,opacity:0.55,depthWrite:false}),0.225);
-  m.position.set(x,0.225,z);
+  const m=ground(SCORCH_GEO,SCORCH_MAT,0.225);
+  m.position.set(x,0.225,z);m.scale.setScalar(r);
 }
 function charify(root){root.traverse(n=>{if(n.isMesh)n.material=M(0x23241e);});}
 function sandbagRing(cx,cz,r){
@@ -1072,7 +1086,6 @@ function buildBridge(){
     const lamp=new THREE.Mesh(new THREE.SphereGeometry(0.34,8,6),
       new THREE.MeshBasicMaterial({color:0xffe9a8}));
     lamp.position.set(sx,DECKY+6,sz);g.add(lamp);
-    const glow=new THREE.PointLight(0xffdf9a,0.45,22);glow.position.copy(lamp.position);g.add(glow);
   }
   // approach ramps blending deck height down to the road
   for(const rz of [-18.9,18.9]){
@@ -1257,6 +1270,7 @@ function forest(cx,cz,count,rad,kind){
 }
 function crushTree(o,heading){
   removeObstacle(o);
+  unbake(o.mesh);                    // lift the tree out of its batch so it can topple on its own
   o.mesh.rotation.y=heading;
   fallers.push({mesh:o.mesh,t:0});
   for(let k=0;k<4;k++)puffDust(o.x,o.z,0x86a468,0.5);
@@ -2155,9 +2169,18 @@ const boomGeo=new THREE.SphereGeometry(1,10,8);
 const debGeo=new THREE.BoxGeometry(0.4,0.4,0.4);
 const sparkGeo=new THREE.BoxGeometry(0.14,0.14,0.7);
 const flameGeo=new THREE.ConeGeometry(0.5,1.3,6);
+/* effects clean up after themselves: every explosion used to leave its new geometry and materials
+   behind on the GPU, so long games slowly got heavier. Shared pieces are flagged and kept. */
+for(const g of [pGeo,boomGeo,debGeo,sparkGeo,flameGeo])g.userData.shared=true;
+pMatF.userData.shared=pMatE.userData.shared=true;
+function dropFx(m){scene.remove(m);
+  if(m.geometry&&!m.geometry.userData.shared)m.geometry.dispose();
+  if(m.material&&!m.material.userData.shared)m.material.dispose();}
+/* a removed vehicle, mine or toppled tree: free its geometry (materials are shared and stay) */
+function freeGeo(root){root.traverse(n=>{if(n.isMesh&&n.geometry&&!n.geometry.userData.shared)n.geometry.dispose();});}
 function explode(x,y,z,size){
   flashLight.position.set(x,y+4,z);
-  flashLight.intensity=Math.min(7,2.5+size*1.3);
+  flashLight.intensity=Math.min(7,2.5+size*1.3)*Math.PI;
   const ring=new THREE.Mesh(new THREE.RingGeometry(0.8,1.3,26),
     new THREE.MeshBasicMaterial({color:0xffe0b0,transparent:true,opacity:0.7,depthWrite:false}));
   ring.rotation.x=-Math.PI/2;ring.position.set(x,0.3,z);scene.add(ring);
@@ -2215,9 +2238,9 @@ function muzzleFlash(x,y,z){
   const m=new THREE.Mesh(boomGeo,new THREE.MeshBasicMaterial({color:0xffe6a0,transparent:true,opacity:0.9}));
   m.position.set(x,y,z);m.scale.setScalar(0.5);scene.add(m);
   booms.push({m,t:0.55,size:0.7,rise:0});
-  flashLight.position.set(x,y+1,z);flashLight.intensity=Math.min(4,flashLight.intensity+2.2);
+  flashLight.position.set(x,y+1,z);flashLight.intensity=Math.min(4*Math.PI,flashLight.intensity+2.2*Math.PI);
 }
-const dustGeo=new THREE.SphereGeometry(0.5,6,5);
+const dustGeo=new THREE.SphereGeometry(0.5,6,5);dustGeo.userData.shared=true;
 function puffDust(x,z,color,op){
   const m=new THREE.Mesh(dustGeo,new THREE.MeshLambertMaterial({color:color||0xc9b98c,transparent:true,opacity:op||0.4}));
   m.position.set(x+rand(-0.6,0.6),0.4,z+rand(-0.6,0.6));
@@ -2293,7 +2316,7 @@ function loseVehicle(burnt){
     charify(player.mesh);
     player.mesh.position.y=Math.min(player.mesh.position.y,0);
     player.mesh.rotation.z=rand(-0.15,0.15);
-    if(type==='heli')scene.remove(player.mesh);
+    if(type==='heli'){scene.remove(player.mesh);freeGeo(player.mesh);}
     else{addSmolder(player.x,player.z);startFire(player.x,player.z);addRide(player.x,player.z,2.4,1.2);}
   }else{
     player.mesh.traverse(n=>{if(n.isMesh&&n.material&&n.material.color)n.material=M(0x5c6153);});
@@ -2385,7 +2408,7 @@ $('hangarBtn').addEventListener('click',()=>{
     flag.x=player.x; flag.z=player.z;
     flag.mesh.visible=true; flag.mesh.position.set(flag.x,0,flag.z);
     $('objective').textContent='RECOVER THE FLAG'; }
-  scene.remove(player.mesh);
+  scene.remove(player.mesh);freeGeo(player.mesh);
   if(rotorWash){scene.remove(rotorWash);rotorWash=null;}
   player=null; $('hangarBtn').style.display='none';
   $('modeBtn').style.display='none';
@@ -2515,7 +2538,7 @@ function updateETanks(dt){
     if(t.goHome){
       tx=0;tz=192;
       if(Math.hypot(tx-t.x,tz-t.z)<8){
-        scene.remove(t.mesh);etanks.splice(j,1);eCtl.respawn=3;
+        scene.remove(t.mesh);freeGeo(t.mesh);etanks.splice(j,1);eCtl.respawn=3;
         continue;
       }
     }else{
@@ -2540,7 +2563,7 @@ function updateETanks(dt){
     for(let k=playerMines.length-1;k>=0;k--){
       const mn=playerMines[k];
       if(dist2(t.x,t.z,mn.x,mn.z)<2.6*2.6){
-        scene.remove(mn.mesh);playerMines.splice(k,1);
+        scene.remove(mn.mesh);freeGeo(mn.mesh);playerMines.splice(k,1);
         explode(mn.x,0.5,mn.z,3.4);
         t.hp-=65;
         if(t.hp<=0){killETank(j);break;}
@@ -2566,7 +2589,7 @@ function updateEJeep(dt){
   if(ejeep.goHome){
     tx=0;tz=196;
     if(Math.hypot(tx-ejeep.x,tz-ejeep.z)<7){
-      scene.remove(ejeep.mesh);ejeep=null;eCtl.respawn=3;
+      scene.remove(ejeep.mesh);freeGeo(ejeep.mesh);ejeep=null;eCtl.respawn=3;
       return;
     }
   }else{
@@ -2681,15 +2704,205 @@ function updateSupply(dt){
 }
 
 /* ============================== main loop ============================== */
+/* ============================== static batching ==============================
+   The scenery (trees, palms, rocks, reeds, fences, crates, ruins…) was thousands of separate meshes, each
+   its own draw call (twice, with shadows). After the world is built, everything in `decor` is merged into a
+   few big meshes per map cell, one per kind of material, with each part's colour baked into its vertices.
+   The cells keep off-screen scenery culled. Trees stay crushable: each tree remembers where its vertices
+   sit in the batches, and when a tank flattens it those vertices collapse and the original tree (kept aside)
+   is put back in the scene to topple as before. */
+const BATCH_CELL=200;
+const batchMats=new Map();
+function batchMat(src){
+  const key=[src.type,src.map?src.map.uuid:'-',src.side,src.transparent?1:0,src.opacity,src.depthWrite?1:0,
+    src.polygonOffset?src.polygonOffsetFactor+'/'+src.polygonOffsetUnits:'-'].join('|');
+  let m=batchMats.get(key);
+  if(!m){
+    m=new src.constructor({map:src.map||null,side:src.side,transparent:src.transparent,opacity:src.opacity,
+      depthWrite:src.depthWrite,vertexColors:true});
+    if(src.polygonOffset){m.polygonOffset=true;m.polygonOffsetFactor=src.polygonOffsetFactor;m.polygonOffsetUnits=src.polygonOffsetUnits;}
+    m.userData.shared=true; batchMats.set(key,m);
+  }
+  return {m,key};
+}
+function bakeable(root){
+  let ok=true;
+  root.traverse(n=>{
+    if(n.isLight||n.isSprite||n.isPoints||n.isLine)ok=false;
+    if(n.isMesh&&(Array.isArray(n.material)||!(n.material.isMeshLambertMaterial||n.material.isMeshBasicMaterial)))ok=false;
+  });
+  return ok;
+}
+/* indestructible buildings (barriers, HQs, ruins, depots, fuel stations) join the batches too, except their
+   moving or re-coloured parts: radar dishes, gate leaves, capture pennants, rings, markers and trim */
+function harvestStatic(){
+  const keep=new Set();
+  radarDishes.forEach(o=>keep.add(o));
+  capPoints.forEach(p=>[p.pennant,p.ring,p.marker,p.trim].forEach(o=>o&&keep.add(o)));
+  gates.forEach(g=>(g.leaves||[]).forEach(o=>keep.add(o)));
+  const roots=new Set(obstacles.filter(o=>o.hp===Infinity&&['barrier','hq','ruin','depot','kiosk'].includes(o.type)).map(o=>o.mesh));
+  scene.updateMatrixWorld(true);
+  for(const root of roots){
+    if(!root.parent||root.parent===decor||keep.has(root))continue;
+    if(root.isMesh&&!root.children.length){decor.attach(root);continue;}
+    const take=[];
+    root.traverse(n=>{
+      if(n===root||!n.isMesh)return;
+      for(let a=n;a&&a!==root;a=a.parent){if(keep.has(a))return;if(a!==n&&take.includes(a))return;}
+      take.push(n);
+    });
+    take.forEach(n=>decor.attach(n));
+  }
+}
+function bakeDecor(){
+  harvestStatic();
+  decor.updateMatrixWorld(true);
+  const buckets=new Map(), trees=new Set(obstacles.filter(o=>o.type==='tree').map(o=>o.mesh));
+  const _n=new THREE.Matrix3();
+  for(const root of [...decor.children]){
+    if(!root.visible||!bakeable(root))continue;
+    const cell=Math.floor(root.position.x/BATCH_CELL)+','+Math.floor(root.position.z/BATCH_CELL);
+    const ranges=[];
+    root.traverse(n=>{
+      if(!n.isMesh||!n.visible)return;
+      const {m,key:mk}=batchMat(n.material);
+      const key=cell+'|'+mk+'|'+(n.castShadow?1:0)+(n.receiveShadow?1:0);
+      let b=buckets.get(key);
+      if(!b){b={mat:m,cast:n.castShadow,recv:n.receiveShadow,pos:[],nor:[],uv:[],col:[],verts:0};buckets.set(key,b);}
+      const g=n.geometry.index?n.geometry.toNonIndexed():n.geometry.clone();
+      if(!g.attributes.normal)g.computeVertexNormals();
+      const P=g.attributes.position, N=g.attributes.normal, U=g.attributes.uv, cnt=P.count;
+      const mw=n.matrixWorld; _n.getNormalMatrix(mw);
+      const flip=mw.determinant()<0;          // mirrored parts: swap two corners so faces still point out
+      const c=n.material.color, v=new THREE.Vector3(), nn=new THREE.Vector3();
+      for(let i=0;i<cnt;i++){
+        const j=flip?(i%3===1?i+1:i%3===2?i-1:i):i;
+        v.fromBufferAttribute(P,j).applyMatrix4(mw); b.pos.push(v.x,v.y,v.z);
+        nn.fromBufferAttribute(N,j).applyMatrix3(_n).normalize(); b.nor.push(nn.x,nn.y,nn.z);
+        if(U)b.uv.push(U.getX(j),U.getY(j));else b.uv.push(0,0);
+        b.col.push(c.r,c.g,c.b);
+      }
+      g.dispose();
+      ranges.push({b,start:b.verts,count:cnt});
+      b.verts+=cnt;
+    });
+    decor.remove(root);
+    if(trees.has(root))root.userData.batch=ranges;            // keep the tree for toppling later
+    else freeGeo(root);
+  }
+  for(const b of buckets.values()){
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(b.pos,3));
+    g.setAttribute('normal',new THREE.Float32BufferAttribute(b.nor,3));
+    g.setAttribute('uv',new THREE.Float32BufferAttribute(b.uv,2));
+    g.setAttribute('color',new THREE.Float32BufferAttribute(b.col,3));
+    g.computeBoundingSphere();
+    const mesh=new THREE.Mesh(g,b.mat);
+    mesh.castShadow=b.cast; mesh.receiveShadow=b.recv;
+    mesh.matrixAutoUpdate=false; mesh.updateMatrix();
+    decor.add(mesh); b.mesh=mesh; b.pos=b.nor=b.uv=b.col=null;
+  }
+}
+/* Merge a model's parts into one mesh per material, inside the model itself, so it still moves, squashes and
+   chars as one piece (watchtowers, turret bases, the parked vehicles). Parts under a `keep` node (a turret's
+   swivelling gun, a rotor, wheels) are left alone. */
+function bakeInPlace(root,keep){
+  root.updateMatrixWorld(true);
+  const inv=new THREE.Matrix4().copy(root.matrixWorld).invert(), rel=new THREE.Matrix4(), _n=new THREE.Matrix3();
+  const buckets=new Map(), take=[];
+  root.traverse(n=>{
+    if(n===root||!n.isMesh||!n.visible)return;
+    if(Array.isArray(n.material)||!(n.material.isMeshLambertMaterial||n.material.isMeshBasicMaterial))return;
+    for(let a=n;a&&a!==root;a=a.parent)if(keep.has(a))return;
+    take.push(n);
+  });
+  if(take.length<3)return;
+  for(const n of take){
+    const {m,key:mk}=batchMat(n.material);
+    const key=mk+'|'+(n.castShadow?1:0)+(n.receiveShadow?1:0);
+    let b=buckets.get(key);
+    if(!b){b={mat:m,cast:n.castShadow,recv:n.receiveShadow,pos:[],nor:[],uv:[],col:[]};buckets.set(key,b);}
+    const g=n.geometry.index?n.geometry.toNonIndexed():n.geometry.clone();
+    if(!g.attributes.normal)g.computeVertexNormals();
+    rel.multiplyMatrices(inv,n.matrixWorld); _n.getNormalMatrix(rel);
+    const P=g.attributes.position,N=g.attributes.normal,U=g.attributes.uv,flip=rel.determinant()<0;
+    const c=n.material.color,v=new THREE.Vector3(),nn=new THREE.Vector3();
+    for(let i=0;i<P.count;i++){
+      const j=flip?(i%3===1?i+1:i%3===2?i-1:i):i;
+      v.fromBufferAttribute(P,j).applyMatrix4(rel);b.pos.push(v.x,v.y,v.z);
+      nn.fromBufferAttribute(N,j).applyMatrix3(_n).normalize();b.nor.push(nn.x,nn.y,nn.z);
+      if(U)b.uv.push(U.getX(j),U.getY(j));else b.uv.push(0,0);
+      b.col.push(c.r,c.g,c.b);
+    }
+    g.dispose();
+  }
+  // remove the merged parts (a part that carries kept children, e.g. a wheel hub, stays as an empty holder)
+  for(const n of take){
+    let hasKept=false;n.traverse(c=>{if(c!==n&&keep.has(c))hasKept=true;});
+    if(hasKept){const e=new THREE.BufferGeometry();e.setAttribute('position',new THREE.Float32BufferAttribute([],3));n.geometry=e;continue;}
+    n.parent.remove(n);
+    if(!n.geometry.userData.shared)n.geometry.dispose();
+  }
+  for(const b of buckets.values()){
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(b.pos,3));
+    g.setAttribute('normal',new THREE.Float32BufferAttribute(b.nor,3));
+    g.setAttribute('uv',new THREE.Float32BufferAttribute(b.uv,2));
+    g.setAttribute('color',new THREE.Float32BufferAttribute(b.col,3));
+    const mesh=new THREE.Mesh(g,b.mat);mesh.castShadow=b.cast;mesh.receiveShadow=b.recv;
+    root.add(mesh);
+  }
+}
+function bakeModels(){
+  for(const o of obstacles)if(o.type==='tower')bakeInPlace(o.mesh,new Set());
+  for(const t of turrets)bakeInPlace(t.mesh,new Set([t.pivot]));
+  for(const k of Object.keys(parked)){
+    const m=parked[k];if(k==='_ring'||!m||!m.isObject3D)continue;
+    const u=m.userData;
+    bakeInPlace(m,new Set([u.rotor,u.tailRotor,...(u.wheels||[])].filter(Boolean)));
+  }
+}
+/* take one tree back out of the batches: collapse its vertices there and return the real tree to the scene */
+function unbake(root){
+  const ranges=root.userData.batch; if(!ranges)return;
+  for(const r of ranges){
+    const pos=r.b.mesh.geometry.attributes.position;
+    pos.array.fill(0,r.start*3,(r.start+r.count)*3); pos.needsUpdate=true;
+  }
+  root.userData.batch=null; decor.add(root);
+}
+
 buildTextures();
 let last=performance.now();
 buildWorld(); buildFlag(); buildParked();
+bakeDecor(); bakeModels();
 parked._ring.position.set(SLOT.jeep.x,0.28,SLOT.jeep.z);
 camera.position.set(-80,60,-60); camera.lookAt(0,0,60);
+
+/* graphics quality: phones that can't keep up drop detail a step at a time — sharpness, then shadow
+   detail, then shadows, then resolution — whenever the frame rate sits under 40 fps for 3 seconds.
+   Add ?fixedquality to the URL to switch this off (handy for testing). */
+const quality={tier:0,frames:[],low:0,adapt:!/[?&]fixedquality/.test(location.search)};
+function adaptQuality(dt){
+  if(!quality.adapt||quality.tier>=4||state!=='PLAY')return;
+  quality.frames.push(dt);
+  let sum=0;for(const f of quality.frames)sum+=f;
+  while(sum>2&&quality.frames.length>1)sum-=quality.frames.shift();
+  if(sum<1.5)return;
+  const fps=quality.frames.length/sum;
+  if(fps>=40){quality.low=0;return;}
+  quality.low+=dt; if(quality.low<3)return;
+  quality.low=0;quality.frames=[];quality.tier++;
+  if(quality.tier===1){renderer.setPixelRatio(1);renderer.setSize(innerWidth,innerHeight);}
+  if(quality.tier===2){sun.shadow.mapSize.set(1024,1024);if(sun.shadow.map){sun.shadow.map.dispose();sun.shadow.map=null;}}
+  if(quality.tier===3){renderer.shadowMap.enabled=false;scene.traverse(o=>{if(o.material)o.material.needsUpdate=true;});}
+  if(quality.tier===4){renderer.setPixelRatio(0.75);renderer.setSize(innerWidth,innerHeight);}
+}
 
 function loop(now){
   requestAnimationFrame(loop);
   const dt=Math.min(0.05,(now-last)/1000); last=now;
+  adaptQuality(dt);
   const t=now/1000;
 
   if(TEX.water){TEX.water.offset.x+=dt*0.008;TEX.water.offset.y+=dt*0.004;}
@@ -2697,7 +2910,7 @@ function loop(now){
   for(const rd of radarDishes)rd.rotation.y+=dt*0.8;
   if(flag.cloth)flag.cloth.rotation.y=Math.sin(t*3)*0.25;
   if(flag.state==='dropped'&&flag.mesh)flag.mesh.rotation.y+=dt;
-  flashLight.intensity=Math.max(0,flashLight.intensity-dt*16);
+  flashLight.intensity=Math.max(0,flashLight.intensity-dt*16*Math.PI);
   clouds.forEach(c=>{c.m.position.x+=c.vx*dt;if(c.m.position.x>420)c.m.position.x=-420;});
   capPoints.forEach(pt=>{
     pt.pennant.userData.cloth.rotation.y=Math.sin(t*2.6+pt.x)*0.3;
@@ -2719,14 +2932,14 @@ function loop(now){
       if(b.drift)b.m.position.x+=b.drift*dt;
       b.m.material.opacity=Math.max(0,(b.isRing?0.7:0.95)-b.t);
     }
-    if(b.t>1.2){scene.remove(b.m);booms.splice(i,1);}}
+    if(b.t>1.2){dropFx(b.m);booms.splice(i,1);}}
   for(let i=dusts.length-1;i>=0;i--){const d=dusts[i];d.t+=dt;
     if(d.t>0){
       d.m.scale.setScalar(1+d.t*3.2);
       d.m.position.y+=dt*1.4;
       d.m.material.opacity=Math.max(0,0.4-d.t*0.5);
     }
-    if(d.t>0.8){scene.remove(d.m);dusts.splice(i,1);}}
+    if(d.t>0.8){dropFx(d.m);dusts.splice(i,1);}}
   for(let i=debris.length-1;i>=0;i--){const d=debris[i];d.t+=dt;
     d.vy-=32*dt;
     d.m.position.x+=d.vx*dt;
@@ -2742,15 +2955,15 @@ function loop(now){
     if(d.m.position.y<0.25){
       d.m.position.y=0.25;d.vy=0;d.vx*=0.5;d.vz*=0.5;d.sx*=0.4;d.sy*=0.4;
     }
-    if(d.t>3.5){scene.remove(d.m);debris.splice(i,1);}}
+    if(d.t>3.5){dropFx(d.m);debris.splice(i,1);}}
   for(let i=sparks.length-1;i>=0;i--){const s=sparks[i];s.t+=dt;
     s.vy-=20*dt;
     s.m.position.x+=s.vx*dt;s.m.position.y+=s.vy*dt;s.m.position.z+=s.vz*dt;
-    if(s.t>0.35){scene.remove(s.m);sparks.splice(i,1);}}
+    if(s.t>0.35){dropFx(s.m);sparks.splice(i,1);}}
   for(let i=fallers.length-1;i>=0;i--){const f=fallers[i];f.t+=dt;
     f.mesh.rotation.x=Math.min(1.5,f.t*2.6);
     if(f.t>1.2)f.mesh.position.y-=dt*0.5;
-    if(f.t>3.5){decor.remove(f.mesh);scene.remove(f.mesh);fallers.splice(i,1);}}
+    if(f.t>3.5){decor.remove(f.mesh);scene.remove(f.mesh);freeGeo(f.mesh);fallers.splice(i,1);}}
   for(let i=flames.length-1;i>=0;i--){
     const f=flames[i];
     f.life-=dt;f.next-=dt;
@@ -2974,7 +3187,7 @@ function updatePlayer(dt){
       for(let k=enemyMines.length-1;k>=0;k--){
         const mn=enemyMines[k];
         if(dist2(p.x,p.z,mn.x,mn.z)<6*6){
-          scene.remove(mn.mesh);enemyMines.splice(k,1);
+          scene.remove(mn.mesh);freeGeo(mn.mesh);enemyMines.splice(k,1);
           score+=50;sfx.defuse();
           for(let q=0;q<3;q++)puffDust(mn.x,mn.z,0xffd94a,0.5);
           if(!mineHinted){mineHinted=true;showMsg('MINE CLEARED +50',1.8);}
@@ -2985,7 +3198,7 @@ function updatePlayer(dt){
       for(let k=enemyMines.length-1;k>=0;k--){
         const mn=enemyMines[k];
         if(dist2(p.x,p.z,mn.x,mn.z)<2.3*2.3){
-          scene.remove(mn.mesh);enemyMines.splice(k,1);
+          scene.remove(mn.mesh);freeGeo(mn.mesh);enemyMines.splice(k,1);
           explode(mn.x,0.5,mn.z,3.4);
           hurtPlayer(p.type==='mlay'?18:45);
           break;
@@ -3076,7 +3289,7 @@ function updatePlayer(dt){
         for(let k=enemyMines.length-1;k>=0;k--){
           const mn=enemyMines[k];
           if(dist2(p.x,p.z,mn.x,mn.z)<9*9){
-            scene.remove(mn.mesh);enemyMines.splice(k,1);
+            scene.remove(mn.mesh);freeGeo(mn.mesh);enemyMines.splice(k,1);
             score+=50;sfx.defuse();cleared=true;
             for(let q=0;q<3;q++)puffDust(mn.x,mn.z,0xffd94a,0.5);
           }
@@ -3090,7 +3303,7 @@ function updatePlayer(dt){
         const mx2=p.x-Math.sin(p.heading)*3.4, mz2=p.z-Math.cos(p.heading)*3.4;
         playerMines.push(makeMine(mx2,mz2,true));
         if(playerMines.length>10){
-          const old=playerMines.shift();scene.remove(old.mesh);
+          const old=playerMines.shift();scene.remove(old.mesh);freeGeo(old.mesh);
         }
         sfx.mine();
         updateBars();
